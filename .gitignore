@@ -3,7 +3,6 @@ config.env
 data*
 .vscode
 .idea
-*.json
 *.pickle
 .netrc
 log.txt
@@ -13,7 +12,6 @@ MediaInfo/*
 Images/*
 rclone/*
 list_drives.txt
-cookies.txt
 downloads
 bot.session
 user.session

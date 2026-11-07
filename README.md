@@ -94,7 +94,7 @@ cp config_sample.env config.env
 _____REMOVE_THIS_LINE_____=True
 ```
 
-_Fill up rest of the fields. Meaning of each field is discussed below._
+_Fill up rest of the fields. Meaning of each field is discussed below. Keep `config.env` private: it is ignored by Git and must never be committed. For cloud deployment, use the platform's encrypted environment-variable settings._
 
 **NOTE**: All values must be filled between quotes, even if it's `Int`, `Bool` or `List`.
 

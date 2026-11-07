@@ -399,3 +399,29 @@ heroku logs -a APP_NAME
 
 - All files to be Uploaded in `main` Branch and set Upstream as `kpsmlx` Branch.
 - View the **Upstream Branch**: **[kpsmlx](https://github.com/Tamilupdates/KPSML-X/tree/kpsmlx)**
+
+
+---
+
+## 🚀 Deployment Guide (Koyeb)
+
+This repository can be deployed on Koyeb using its Dockerfile.
+
+1. Create a new **Web Service** in Koyeb and connect this GitHub repository.
+2. Select **Dockerfile** as the builder and use the `main` branch.
+3. Set the service's exposed HTTP port to **8000** (the Dockerfile sets `PORT=8000`).
+4. Set the health check to **HTTP**, path `/`, port **8000**. The upstream bot serves this route through Gunicorn.
+5. Add these environment variables in Koyeb's encrypted environment settings:
+   - `BOT_TOKEN`
+   - `OWNER_ID`
+   - `TELEGRAM_API`
+   - `TELEGRAM_HASH`
+   - `BASE_URL`: your Koyeb public service URL (for example, `https://your-app-your-org.koyeb.app`)
+   - `DATABASE_URL`: recommended MongoDB connection string for persistent bot settings and configuration.
+   - `UPSTREAM_REPO=https://github.com/Tamilupdates/KPSML-X`
+   - `UPSTREAM_BRANCH=kpsmlx`
+6. Do not add the template guard variable `_____REMOVE_THIS_LINE_____`. If you use a `config.env` file instead, remove the guard line from it.
+7. If your Koyeb plan supports persistent volumes, attach one at `/usr/src/app/downloads`. Without a persistent volume, downloaded files can be lost when the instance is replaced or restarted.
+8. Deploy and check the service logs. Confirm that Gunicorn starts on port 8000 and the Telegram bot reports that it has started.
+
+**Important:** The HTTP health check only confirms that the web endpoint is responding; it does not prove that Telegram, MongoDB, qBittorrent, or downloads are fully operational. Keep the service running as a continuously running worker/web service, and make sure your selected Koyeb instance has enough memory and disk for the downloads you expect.

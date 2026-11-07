@@ -4,7 +4,6 @@ aioshutil
 anytree==2.8.0
 apscheduler
 aria2p
-asyncio
 beautifulsoup4
 cinemagoer==2023.5.1
 cloudscraper
@@ -48,3 +47,4 @@ yt-dlp-ejs
 setuptools
 pymediainfo
 pyaes
+

@@ -1,103 +1,151 @@
-from logging import FileHandler, StreamHandler, INFO, basicConfig, error as log_error, info as log_info
-from os import path as ospath, environ, remove
-from subprocess import run as srun, call as scall
+import logging
+import os
+import shutil
+import subprocess
+from pathlib import Path
+from urllib.parse import urlsplit
+
+import requests
+from dotenv import dotenv_values, load_dotenv
 from pkg_resources import working_set
-from requests import get as rget
-from dotenv import load_dotenv, dotenv_values
 from pymongo import MongoClient
 
-if ospath.exists('log.txt'):
-    with open('log.txt', 'r+') as f:
-        f.truncate(0)
+LOG_FILE = "log.txt"
 
-if ospath.exists('rlog.txt'):
-    remove('rlog.txt')
+if Path(LOG_FILE).exists():
+    Path(LOG_FILE).write_text("", encoding="utf-8")
+if Path("rlog.txt").exists():
+    Path("rlog.txt").unlink()
 
-basicConfig(format="[%(asctime)s] [%(levelname)s] - %(message)s",
-            datefmt="%d-%b-%y %I:%M:%S %p",
-            handlers=[FileHandler('log.txt'), StreamHandler()],
-            level=INFO)
+logging.basicConfig(
+    format="[%(asctime)s] [%(levelname)s] - %(message)s",
+    datefmt="%d-%b-%y %I:%M:%S %p",
+    handlers=[logging.FileHandler(LOG_FILE), logging.StreamHandler()],
+    level=logging.INFO,
+)
+log = logging.getLogger(__name__)
 
-CONFIG_FILE_URL = environ.get('CONFIG_FILE_URL')
-try:
-    if len(CONFIG_FILE_URL) == 0:
-        raise TypeError
+
+def run_command(args):
+    """Run a command without a shell, so config values cannot become shell code."""
+    return subprocess.run(
+        args,
+        check=True,
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.PIPE,
+        text=True,
+    )
+
+
+# Optional remote config download. A failed download does not overwrite a
+# working local config file or prevent environment-based deployment.
+config_url = os.environ.get("CONFIG_FILE_URL", "").strip()
+if config_url:
     try:
-        res = rget(CONFIG_FILE_URL)
-        if res.status_code == 200:
-            with open('config.env', 'wb+') as f:
-                f.write(res.content)
-        else:
-            log_error(f"Failed to download config.env {res.status_code}")
-    except Exception as e:
-        log_error(f"CONFIG_FILE_URL: {e}")
-except:
-    pass
+        parsed_config_url = urlsplit(config_url)
+        if parsed_config_url.scheme not in ("https", "http") or not parsed_config_url.netloc:
+            raise ValueError("CONFIG_FILE_URL must be an HTTP(S) URL")
+        response = requests.get(config_url, timeout=(10, 30))
+        response.raise_for_status()
+        Path("config.env.tmp").write_bytes(response.content)
+        Path("config.env.tmp").replace("config.env")
+        log.info("Downloaded remote configuration.")
+    except Exception as exc:
+        Path("config.env.tmp").unlink(missing_ok=True)
+        log.error("CONFIG_FILE_URL failed (%s). Using existing environment/config.", type(exc).__name__)
 
-load_dotenv('config.env', override=True)
+# Keep deployment-platform variables authoritative; use config.env as fallback.
+load_dotenv("config.env", override=False)
+
+if os.environ.get("_____REMOVE_THIS_LINE_____"):
+    log.error("Remove the template guard line from config.env before deploying.")
+    raise SystemExit(1)
+
+bot_token = os.environ.get("BOT_TOKEN", "").strip()
+if not bot_token:
+    log.error("BOT_TOKEN is missing. Set it in config.env or deployment environment.")
+    raise SystemExit(1)
+
+bot_id = bot_token.split(":", 1)[0]
+database_url = os.environ.get("DATABASE_URL", "").strip()
+
+if database_url:
+    try:
+        with MongoClient(
+            database_url,
+            serverSelectionTimeoutMS=10000,
+            connectTimeoutMS=10000,
+        ) as conn:
+            db = conn.kpsmlx
+            old_config = db.settings.deployConfig.find_one({"_id": bot_id})
+            config_dict = db.settings.config.find_one({"_id": bot_id})
+
+            if old_config is not None:
+                old_config.pop("_id", None)
+
+            current_config = dict(dotenv_values("config.env"))
+            if config_dict is not None and (
+                old_config is None or old_config == current_config
+            ):
+                upstream_repo = config_dict.get("UPSTREAM_REPO")
+                upstream_branch = config_dict.get("UPSTREAM_BRANCH")
+                upgrade_packages = config_dict.get("UPDATE_PACKAGES", "False")
+
+                if upstream_repo:
+                    os.environ["UPSTREAM_REPO"] = upstream_repo
+                if upstream_branch:
+                    os.environ["UPSTREAM_BRANCH"] = upstream_branch
+                os.environ["UPGRADE_PACKAGES"] = upgrade_packages
+    except Exception as exc:
+        log.error("MongoDB configuration lookup failed (%s).", type(exc).__name__)
+        raise SystemExit(1)
+
+if os.environ.get("UPGRADE_PACKAGES", "False").lower() == "true":
+    package_names = sorted({dist.project_name for dist in working_set})
+    try:
+        subprocess.run(
+            ["uv", "pip", "install", "--system", *package_names],
+            check=True,
+        )
+    except (OSError, subprocess.CalledProcessError) as exc:
+        log.error("Package upgrade failed (%s).", type(exc).__name__)
+        raise SystemExit(1)
+
+upstream_repo = os.environ.get(
+    "UPSTREAM_REPO", "https://github.com/Tamilupdates/KPSML-X"
+).strip()
+upstream_branch = os.environ.get("UPSTREAM_BRANCH", "kpsmlx").strip()
+
+# Accept normal HTTPS/SSH Git URLs; reject malformed values before invoking Git.
+parsed_repo = urlsplit(upstream_repo)
+if (
+    parsed_repo.scheme not in ("https", "http", "ssh", "git")
+    or not parsed_repo.netloc
+    or not upstream_branch
+):
+    log.error("UPSTREAM_REPO or UPSTREAM_BRANCH is invalid.")
+    raise SystemExit(1)
 
 try:
-    if bool(environ.get('_____REMOVE_THIS_LINE_____')):
-        log_error('The README.md file there to be read! Exiting now!')
-        exit()
-except:
-    pass
+    run_command(["git", "check-ref-format", "--branch", upstream_branch])
 
-BOT_TOKEN = environ.get('BOT_TOKEN', '')
-if len(BOT_TOKEN) == 0:
-    log_error("BOT_TOKEN variable is missing! Exiting now")
-    exit(1)
+    git_dir = Path(".git")
+    if git_dir.is_dir():
+        shutil.rmtree(git_dir)
+    elif git_dir.exists():
+        git_dir.unlink()
 
-bot_id = BOT_TOKEN.split(':', 1)[0]
+    run_command(["git", "init", "-q"])
+    run_command(["git", "config", "user.email", "bot-updater@localhost"])
+    run_command(["git", "config", "user.name", "bot-updater"])
+    run_command(["git", "add", "-A"])
+    run_command(["git", "commit", "-m", "deployment snapshot", "-q"])
+    run_command(["git", "remote", "add", "origin", upstream_repo])
+    run_command(["git", "fetch", "--depth=1", "origin", upstream_branch])
+    run_command(["git", "reset", "--hard", "FETCH_HEAD"])
 
-DATABASE_URL = environ.get('DATABASE_URL', '')
-if len(DATABASE_URL) == 0:
-    DATABASE_URL = None
-
-if DATABASE_URL is not None:
-    conn = MongoClient(DATABASE_URL)
-    db = conn.kpsmlx
-    old_config = db.settings.deployConfig.find_one({'_id': bot_id})
-    config_dict = db.settings.config.find_one({'_id': bot_id})
-    if old_config is not None:
-        del old_config['_id']
-    if (old_config is not None and old_config == dict(dotenv_values('config.env')) or old_config is None) \
-            and config_dict is not None:
-        environ['UPSTREAM_REPO'] = config_dict['UPSTREAM_REPO']
-        environ['UPSTREAM_BRANCH'] = config_dict['UPSTREAM_BRANCH']
-        environ['UPGRADE_PACKAGES'] = config_dict.get('UPDATE_PACKAGES', 'False')
-    conn.close()
-
-UPGRADE_PACKAGES = environ.get('UPGRADE_PACKAGES', 'False') 
-if UPGRADE_PACKAGES.lower() == 'true':
-    packages = [dist.project_name for dist in working_set]
-    scall("uv pip install --system " + ' '.join(packages), shell=True)
-
-UPSTREAM_REPO = environ.get('UPSTREAM_REPO', '')
-if len(UPSTREAM_REPO) == 0:
-    UPSTREAM_REPO = "https://github.com/Tamilupdates/KPSML-X"
-
-UPSTREAM_BRANCH = environ.get('UPSTREAM_BRANCH', '')
-if len(UPSTREAM_BRANCH) == 0:
-    UPSTREAM_BRANCH = 'kpsmlx'
-
-if UPSTREAM_REPO is not None:
-    if ospath.exists('.git'):
-        srun(["rm", "-rf", ".git"])
-
-    update = srun([f"git init -q \
-                     && git config --global user.email kpstorrent@gmail.com \
-                     && git config --global user.name kpsbots \
-                     && git add . \
-                     && git commit -sm update -q \
-                     && git remote add origin {UPSTREAM_REPO} \
-                     && git fetch origin -q \
-                     && git reset --hard origin/{UPSTREAM_BRANCH} -q"], shell=True)
-
-    repo = UPSTREAM_REPO.split('/')
-    UPSTREAM_REPO = f"https://github.com/{repo[-2]}/{repo[-1]}"
-    if update.returncode == 0:
-        log_info('Successfully updated with latest commits !!')
-    else:
-        log_error('Something went Wrong ! Retry or Ask Support !')
-    log_info(f'UPSTREAM_REPO: {UPSTREAM_REPO} | UPSTREAM_BRANCH: {UPSTREAM_BRANCH}')
+    # Do not print the remote URL: private URLs may contain access credentials.
+    log.info("Successfully updated from upstream branch: %s", upstream_branch)
+except (OSError, subprocess.CalledProcessError) as exc:
+    log.error("Upstream update failed (%s). Bot startup cancelled.", type(exc).__name__)
+    raise SystemExit(1)

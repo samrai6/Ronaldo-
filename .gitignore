@@ -17,3 +17,12 @@ bot.session
 user.session
 terabox.txt
 rclone.conf
+
+# Local secrets and runtime credentials
+.env
+.env.*
+config.env.*
+*.session*
+*.pem
+credentials*.json
+service-account*.json
